@@ -253,7 +253,7 @@
 </div>
 
 <script>
-const API = 'http://localhost:3001';
+const API = 'https://alitrader-server-production.up.railway.app';
 
 let asset = 'gold', tf = '1D', chart = null, alerts = [];
 const live = { gold:{price:null,change:null,history:[]}, btc:{price:null,change:null,history:[]} };
@@ -343,31 +343,54 @@ async function fetchGold(){
 
 async function fetchBTC(){
   const days=tfToDays();
-  // Precio actual
-  const r1=await fetch(`${API}/btc`);
-  const d1=await r1.json();
-  live.btc.price=d1.precio;
-  live.btc.change=d1.cambio24h;
-  const chg=d1.cambio24h;
-  document.getElementById('btc-price').textContent='$'+d1.precio.toLocaleString('en-US',{maximumFractionDigits:0});
-  const el=document.getElementById('btc-chg');
-  el.textContent=(chg>=0?'+':'')+chg.toFixed(2)+'%';
-  el.className='sw-change '+(chg>=0?'pos':'neg');
+  // BTC directo desde el navegador — CoinGecko no bloquea browsers
+  try {
+    const [r1, r2] = await Promise.all([
+      fetch('https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd&include_24hr_change=true'),
+      fetch(`https://api.coingecko.com/api/v3/coins/bitcoin/market_chart?vs_currency=usd&days=${days}&interval=${parseInt(days)<=2?'minutely':'daily'}`)
+    ]);
 
-  // Historial — con fallback si CoinGecko falla
-  try{
-    const r2=await fetch(`${API}/btc/history?days=${days}`);
-    const d2=await r2.json();
-    if(d2.precios && Array.isArray(d2.precios) && d2.precios.length>0){
-      live.btc.history=d2.precios.map(p=>p.precio);
-      document.getElementById('btc-src').textContent='✓ CoinGecko · '+d2.precios.length+' puntos reales';
-    } else {
-      throw new Error('Sin datos de historial');
+    const d1 = await r1.json();
+    const precio = d1.bitcoin.usd;
+    const cambio = d1.bitcoin.usd_24h_change || 0;
+
+    live.btc.price = precio;
+    live.btc.change = cambio;
+
+    document.getElementById('btc-price').textContent='$'+Math.round(precio).toLocaleString('en-US');
+    const el=document.getElementById('btc-chg');
+    el.textContent=(cambio>=0?'+':'')+cambio.toFixed(2)+'%';
+    el.className='sw-change '+(cambio>=0?'pos':'neg');
+
+    // Historial real
+    try {
+      const d2 = await r2.json();
+      if(d2.prices && d2.prices.length > 0){
+        live.btc.history = d2.prices.map(p => Math.round(p[1]*100)/100);
+        document.getElementById('btc-src').textContent='✓ CoinGecko · '+d2.prices.length+' puntos reales · directo';
+      } else throw new Error('sin historial');
+    } catch(e){
+      live.btc.history = genHistory(precio, tfPoints(), tfVol('btc'));
+      document.getElementById('btc-src').textContent='✓ CoinGecko precio real · historial estimado';
     }
-  } catch(e){
-    // Fallback: historial estimado desde precio real
-    live.btc.history=genHistory(d1.precio, tfPoints(), tfVol('btc'));
-    document.getElementById('btc-src').textContent='✓ CoinGecko precio real · historial estimado';
+
+  } catch(err){
+    // Fallback: Kraken API (también permite browsers)
+    try {
+      const r=await fetch('https://api.kraken.com/0/public/Ticker?pair=XBTUSD');
+      const d=await r.json();
+      const precio=parseFloat(d.result.XXBTZUSD.c[0]);
+      live.btc.price=precio;
+      live.btc.change=0;
+      live.btc.history=genHistory(precio, tfPoints(), tfVol('btc'));
+      document.getElementById('btc-price').textContent='$'+Math.round(precio).toLocaleString('en-US');
+      document.getElementById('btc-chg').textContent='';
+      document.getElementById('btc-src').textContent='✓ Kraken · precio real';
+    } catch(e2){
+      console.error('BTC fetch error:', e2.message);
+      document.getElementById('btc-price').textContent='Sin datos';
+      document.getElementById('btc-src').textContent='⚠ Verifica conexión';
+    }
   }
 }
 
