@@ -74,35 +74,28 @@ async function handleRequest(req, res) {
       return;
     }
 
-    // /btc — precio actual de Bitcoin
+    // /btc — precio actual de Bitcoin (Binance primero, CoinGecko como fallback)
     if (path === '/btc') {
       try {
-        const data = await fetchJSON(
-          'https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd&include_24hr_change=true&include_last_updated_at=true'
-        );
-
-        if (!data.bitcoin || !data.bitcoin.usd) throw new Error('Respuesta inesperada de CoinGecko');
-
-        const btc = data.bitcoin;
+        const ticker = await fetchJSON('https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT');
         send(res, 200, {
           simbolo:   'BTC/USD',
-          precio:    btc.usd,
-          cambio24h: Math.round((btc.usd_24h_change || 0) * 100) / 100,
+          precio:    parseFloat(ticker.lastPrice),
+          cambio24h: Math.round(parseFloat(ticker.priceChangePercent) * 100) / 100,
           moneda:    'USD',
-          timestamp: btc.last_updated_at || Math.floor(Date.now()/1000),
-          fuente:    'CoinGecko',
+          timestamp: Math.floor(Date.now()/1000),
+          fuente:    'Binance',
         });
       } catch(e) {
-        // Fallback: usar API alternativa de Binance (pública, sin key)
         try {
-          const ticker = await fetchJSON('https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT');
+          const data = await fetchJSON('https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd&include_24hr_change=true');
           send(res, 200, {
             simbolo:   'BTC/USD',
-            precio:    parseFloat(ticker.lastPrice),
-            cambio24h: Math.round(parseFloat(ticker.priceChangePercent) * 100) / 100,
+            precio:    data.bitcoin.usd,
+            cambio24h: Math.round((data.bitcoin.usd_24h_change||0) * 100) / 100,
             moneda:    'USD',
             timestamp: Math.floor(Date.now()/1000),
-            fuente:    'Binance',
+            fuente:    'CoinGecko',
           });
         } catch(e2) {
           send(res, 500, { error: 'No se pudo obtener precio BTC', detalle: e2.message });
@@ -111,31 +104,17 @@ async function handleRequest(req, res) {
       return;
     }
 
-    // /btc/history — historial de precios BTC
+    // /btc/history
     if (path === '/btc/history') {
-      const days     = url.searchParams.get('days') || '30';
+      const days = url.searchParams.get('days') || '30';
       try {
-        const interval = parseInt(days) <= 2 ? 'minutely' : 'daily';
-        const data = await fetchJSON(
-          `https://api.coingecko.com/api/v3/coins/bitcoin/market_chart?vs_currency=usd&days=${days}&interval=${interval}`
-        );
-        if (!data.prices || !Array.isArray(data.prices)) throw new Error('Sin historial');
-        const precios = data.prices.map(p => ({
-          timestamp: p[0],
-          precio:    Math.round(p[1] * 100) / 100,
-        }));
-        send(res, 200, { simbolo:'BTC/USD', dias:parseInt(days), puntos:precios.length, precios, fuente:'CoinGecko' });
+        const interval = parseInt(days) <= 2 ? '1h' : '1d';
+        const limit = Math.min(parseInt(days) <= 2 ? 48 : parseInt(days), 500);
+        const klines = await fetchJSON(`https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=${interval}&limit=${limit}`);
+        const precios = klines.map(k => ({ timestamp: k[0], precio: Math.round(parseFloat(k[4])*100)/100 }));
+        send(res, 200, { simbolo:'BTC/USD', dias:parseInt(days), puntos:precios.length, precios, fuente:'Binance' });
       } catch(e) {
-        // Fallback: historial de Binance con klines
-        try {
-          const interval = parseInt(days) <= 2 ? '1h' : '1d';
-          const limit = Math.min(parseInt(days) <= 2 ? 48 : parseInt(days), 500);
-          const klines = await fetchJSON(`https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=${interval}&limit=${limit}`);
-          const precios = klines.map(k => ({ timestamp: k[0], precio: Math.round(parseFloat(k[4])*100)/100 }));
-          send(res, 200, { simbolo:'BTC/USD', dias:parseInt(days), puntos:precios.length, precios, fuente:'Binance' });
-        } catch(e2) {
-          send(res, 500, { error: 'No se pudo obtener historial BTC', detalle: e2.message });
-        }
+        send(res, 500, { error: 'No se pudo obtener historial BTC', detalle: e.message });
       }
       return;
     }
