@@ -1,11 +1,12 @@
 // ─────────────────────────────────────────────────────────────
-// AliTrader v2.0 — Servidor proxy local (corregido)
+// AliTrader v2.0 — Servidor completo (API + Dashboard)
 // ─────────────────────────────────────────────────────────────
 
 const http  = require('http');
 const https = require('https');
+const fs    = require('fs');
 
-const PORT       = 3001;
+const PORT       = process.env.PORT || 3001;
 const METALS_KEY = '68071bbcd490047e8dc762dce2135ede';
 
 function fetchJSON(url) {
@@ -31,127 +32,93 @@ function cors() {
 }
 
 function send(res, code, obj) {
+  if (res.headersSent) return;
   res.writeHead(code, cors());
   res.end(JSON.stringify(obj));
 }
 
+function serveDashboard(res) {
+  try {
+    const html = fs.readFileSync('dashboard.html', 'utf8');
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end(html);
+  } catch(e) {
+    res.writeHead(404, { 'Content-Type': 'text/plain' });
+    res.end('dashboard.html no encontrado');
+  }
+}
+
 async function handleRequest(req, res) {
   const url  = new URL(req.url, `http://localhost:${PORT}`);
-  const path = url.pathname;
+  const p    = url.pathname;
 
   if (req.method === 'OPTIONS') { res.writeHead(204, cors()); res.end(); return; }
+  console.log(`[${new Date().toLocaleTimeString()}] ${req.method} ${p}`);
 
-  console.log(`[${new Date().toLocaleTimeString()}] ${req.method} ${path}`);
+  if (p === '/' || p === '/dashboard') { serveDashboard(res); return; }
+
+  if (p === '/health') {
+    send(res, 200, { status:'ok', hora: new Date().toLocaleString('es-MX') });
+    return;
+  }
 
   try {
-
-    // /health
-    if (path === '/health') {
-      send(res, 200, { status: 'ok', hora: new Date().toLocaleString('es-MX') });
-      return;
-    }
-
-    // /gold — precio del oro en USD
-    if (path === '/gold') {
-      const data = await fetchJSON(
-        `https://api.metalpriceapi.com/v1/latest?api_key=${METALS_KEY}&base=USD&currencies=XAU`
-      );
-
+    if (p === '/gold') {
+      const data = await fetchJSON(`https://api.metalpriceapi.com/v1/latest?api_key=${METALS_KEY}&base=USD&currencies=XAU`);
       if (!data.success) throw new Error(data.error?.info || 'MetalPriceAPI error');
-
-      // base USD → XAU rate = cuánto oro compras con 1 USD
-      // precio oro en USD = 1 / rate
-      const xauRate = data.rates.XAU;
-      const precioUSD = Math.round((1 / xauRate) * 100) / 100;
-
-      send(res, 200, {
-        simbolo:   'XAU/USD',
-        precio:    precioUSD,
-        moneda:    'USD',
-        timestamp: data.timestamp,
-        fuente:    'MetalPriceAPI',
-      });
+      send(res, 200, { simbolo:'XAU/USD', precio: Math.round((1/data.rates.XAU)*100)/100, moneda:'USD', timestamp:data.timestamp, fuente:'MetalPriceAPI' });
       return;
     }
 
-    // /btc — precio actual de Bitcoin (Binance primero, CoinGecko como fallback)
-    if (path === '/btc') {
+    if (p === '/btc') {
+      let precio=null, cambio=0, fuente='';
       try {
-        const ticker = await fetchJSON('https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT');
-        send(res, 200, {
-          simbolo:   'BTC/USD',
-          precio:    parseFloat(ticker.lastPrice),
-          cambio24h: Math.round(parseFloat(ticker.priceChangePercent) * 100) / 100,
-          moneda:    'USD',
-          timestamp: Math.floor(Date.now()/1000),
-          fuente:    'Binance',
-        });
+        const d=await fetchJSON('https://www.okx.com/api/v5/market/ticker?instId=BTC-USDT');
+        if(d.data&&d.data[0]){ precio=parseFloat(d.data[0].last); const open=parseFloat(d.data[0].sodUtc8); cambio=open>0?Math.round(((precio-open)/open*100)*100)/100:0; fuente='OKX'; }
+      } catch(e){ console.log('OKX:',e.message); }
+      if(!precio){ try{ const d=await fetchJSON('https://api.diadata.org/v1/assetQuotation/Bitcoin/0x0000000000000000000000000000000000000000'); precio=Math.round(d.Price*100)/100; fuente='DIA'; }catch(e){ console.log('DIA:',e.message); } }
+      if(!precio){ try{ const d=await fetchJSON('https://api.binance.com/api/v3/ticker/24hr?symbol=BTCUSDT'); precio=parseFloat(d.lastPrice); cambio=Math.round(parseFloat(d.priceChangePercent)*100)/100; fuente='Binance'; }catch(e){ console.log('Binance:',e.message); } }
+      if(!precio){ send(res,500,{error:'Sin precio BTC'}); return; }
+      send(res,200,{simbolo:'BTC/USD',precio:Math.round(precio*100)/100,cambio24h:cambio,moneda:'USD',timestamp:Math.floor(Date.now()/1000),fuente});
+      return;
+    }
+
+    if (p === '/btc/history') {
+      const days=url.searchParams.get('days')||'30';
+      try {
+        const interval=parseInt(days)<=2?'1H':'1D';
+        const limit=Math.min(parseInt(days)<=2?48:parseInt(days),300);
+        const d=await fetchJSON(`https://www.okx.com/api/v5/market/candles?instId=BTC-USDT&bar=${interval}&limit=${limit}`);
+        if(!d.data||!d.data.length) throw new Error('Sin datos OKX');
+        const precios=d.data.reverse().map(k=>({timestamp:parseInt(k[0]),precio:Math.round(parseFloat(k[4])*100)/100}));
+        send(res,200,{simbolo:'BTC/USD',dias:parseInt(days),puntos:precios.length,precios,fuente:'OKX'});
       } catch(e) {
         try {
-          const data = await fetchJSON('https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd&include_24hr_change=true');
-          send(res, 200, {
-            simbolo:   'BTC/USD',
-            precio:    data.bitcoin.usd,
-            cambio24h: Math.round((data.bitcoin.usd_24h_change||0) * 100) / 100,
-            moneda:    'USD',
-            timestamp: Math.floor(Date.now()/1000),
-            fuente:    'CoinGecko',
-          });
-        } catch(e2) {
-          send(res, 500, { error: 'No se pudo obtener precio BTC', detalle: e2.message });
-        }
+          const interval=parseInt(days)<=2?'1h':'1d';
+          const limit=Math.min(parseInt(days)<=2?48:parseInt(days),500);
+          const klines=await fetchJSON(`https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=${interval}&limit=${limit}`);
+          const precios=klines.map(k=>({timestamp:k[0],precio:Math.round(parseFloat(k[4])*100)/100}));
+          send(res,200,{simbolo:'BTC/USD',dias:parseInt(days),puntos:precios.length,precios,fuente:'Binance'});
+        } catch(e2){ send(res,500,{error:'Sin historial BTC',detalle:e2.message}); }
       }
       return;
     }
 
-    // /btc/history
-    if (path === '/btc/history') {
-      const days = url.searchParams.get('days') || '30';
-      try {
-        const interval = parseInt(days) <= 2 ? '1h' : '1d';
-        const limit = Math.min(parseInt(days) <= 2 ? 48 : parseInt(days), 500);
-        const klines = await fetchJSON(`https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=${interval}&limit=${limit}`);
-        const precios = klines.map(k => ({ timestamp: k[0], precio: Math.round(parseFloat(k[4])*100)/100 }));
-        send(res, 200, { simbolo:'BTC/USD', dias:parseInt(days), puntos:precios.length, precios, fuente:'Binance' });
-      } catch(e) {
-        send(res, 500, { error: 'No se pudo obtener historial BTC', detalle: e.message });
-      }
-      return;
-    }
+    send(res,404,{error:'Ruta no encontrada'});
 
-    // 404
-    send(res, 404, { error: 'Ruta no encontrada', rutas: ['/health', '/gold', '/btc', '/btc/history?days=30'] });
-
-  } catch (err) {
-    console.error('Error:', err.message);
-    // Solo enviar error si no se han enviado headers aún
-    if (!res.headersSent) {
-      send(res, 500, { error: 'Error del servidor', detalle: err.message });
-    }
+  } catch(err) {
+    console.error('Error:',err.message);
+    if(!res.headersSent) send(res,500,{error:'Error del servidor',detalle:err.message});
   }
 }
 
 const server = http.createServer(handleRequest);
-
 server.listen(PORT, () => {
   console.log('');
-  console.log('  ╔════════════════════════════════════════╗');
-  console.log('  ║     AliTrader v2.0 — Servidor OK       ║');
-  console.log('  ╠════════════════════════════════════════╣');
-  console.log(`  ║  Puerto:  http://localhost:${PORT}        ║`);
-  console.log('  ║  Rutas:   /gold  /btc  /btc/history    ║');
-  console.log('  ╚════════════════════════════════════════╝');
-  console.log('');
-  console.log('  Servidor corriendo. No cierres esta ventana.');
-  console.log('  Para detener: Ctrl + C');
+  console.log('  ╔══════════════════════════════════════╗');
+  console.log('  ║    AliTrader v2.0 — Servidor OK      ║');
+  console.log(`  ║    Dashboard: http://localhost:${PORT}  ║`);
+  console.log('  ╚══════════════════════════════════════╝');
   console.log('');
 });
-
-server.on('error', (err) => {
-  if (err.code === 'EADDRINUSE') {
-    console.error(`\n  Puerto ${PORT} ocupado. Cierra la otra instancia.\n`);
-  } else {
-    console.error('Error:', err);
-  }
-  process.exit(1);
-});
+server.on('error',(err)=>{ console.error('Error:',err.message); process.exit(1); });
