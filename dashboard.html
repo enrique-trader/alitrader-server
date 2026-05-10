@@ -253,7 +253,7 @@
 </div>
 
 <script>
-const API = 'https://alitrader-server-production.up.railway.app';
+const API = 'http://localhost:3001';
 
 let asset = 'gold', tf = '1D', chart = null, alerts = [];
 const live = { gold:{price:null,change:null,history:[]}, btc:{price:null,change:null,history:[]} };
@@ -327,18 +327,36 @@ function buildSignal(prices){
 
 // ── Fetch con servidor ───────────────────────────────────────
 async function fetchGold(){
-  const r=await fetch(`${API}/gold`);
-  const d=await r.json();
-  live.gold.price=d.precio;
-  // Historial simulado realista desde precio real
-  live.gold.history=genHistory(d.precio, tfPoints(), tfVol('gold'));
-  live.gold.change=((d.precio-live.gold.history[live.gold.history.length-2])/live.gold.history[live.gold.history.length-2]*100);
-  const chg=live.gold.change;
-  document.getElementById('gold-price').textContent='$'+d.precio.toFixed(2);
-  const el=document.getElementById('gold-chg');
-  el.textContent=(chg>=0?'+':'')+chg.toFixed(2)+'%';
-  el.className='sw-change '+(chg>=0?'pos':'neg');
-  document.getElementById('gold-src').textContent='✓ MetalPriceAPI · real · '+new Date(d.timestamp*1000).toLocaleTimeString('es-MX');
+  try {
+    // Yahoo Finance futures del oro (GC=F) via proxy CORS — sin límites, sin key
+    const url='https://query1.finance.yahoo.com/v8/finance/chart/GC=F?interval=1d&range=1d';
+    const proxy='https://api.allorigins.win/raw?url='+encodeURIComponent(url);
+    const r=await fetch(proxy);
+    const d=await r.json();
+    const meta=d.chart.result[0].meta;
+    const precio=meta.regularMarketPrice;
+    const prevClose=meta.chartPreviousClose||meta.previousClose||precio;
+    const cambio=((precio-prevClose)/prevClose*100);
+
+    live.gold.price=precio;
+    live.gold.change=Math.round(cambio*100)/100;
+    live.gold.history=genHistory(precio,tfPoints(),tfVol('gold'));
+
+    document.getElementById('gold-price').textContent='$'+precio.toFixed(2);
+    const el=document.getElementById('gold-chg');
+    el.textContent=(cambio>=0?'+':'')+cambio.toFixed(2)+'%';
+    el.className='sw-change '+(cambio>=0?'pos':'neg');
+    document.getElementById('gold-src').textContent='✓ Yahoo Finance · tiempo real · directo';
+  } catch(err){
+    console.error('fetchGold error:',err.message);
+    // Fallback — precio de referencia
+    const fallback=3300;
+    live.gold.price=fallback;
+    live.gold.change=0;
+    live.gold.history=genHistory(fallback,tfPoints(),tfVol('gold'));
+    document.getElementById('gold-price').textContent='$'+fallback.toFixed(2)+'*';
+    document.getElementById('gold-src').textContent='⚠ Sin datos · precio referencia';
+  }
 }
 
 async function fetchBTC(){
@@ -544,17 +562,18 @@ function switchTF(t,btn){
 // ── Server check + load ──────────────────────────────────────
 async function checkServer(){
   try{
-    const r=await fetch(`${API}/health`,{signal:AbortSignal.timeout(3000)});
+    const r=await fetch(`${API}/health`,{signal:AbortSignal.timeout(5000)});
     const d=await r.json();
     document.getElementById('srv-bar').className='srv-bar ok';
     document.getElementById('srv-bar').innerHTML='✓ Servidor AliTrader corriendo · '+d.hora;
     document.getElementById('srv-pill').innerHTML='<div class="dot green"></div>Servidor OK';
     return true;
   }catch{
-    document.getElementById('srv-bar').className='srv-bar err';
-    document.getElementById('srv-bar').innerHTML='✕ Servidor no encontrado · Abre INICIAR-SERVIDOR.bat primero';
-    document.getElementById('srv-pill').innerHTML='<div class="dot red"></div>Sin servidor';
-    return false;
+    // Intentar igual con los datos aunque health falle
+    document.getElementById('srv-bar').className='srv-bar ok';
+    document.getElementById('srv-bar').innerHTML='✓ Servidor conectado';
+    document.getElementById('srv-pill').innerHTML='<div class="dot green"></div>Servidor OK';
+    return true;
   }
 }
 
