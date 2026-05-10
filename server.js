@@ -63,10 +63,53 @@ async function handleRequest(req, res) {
   }
 
   try {
+    // ── /gold ─────────────────────────────────────────────
     if (p === '/gold') {
-      const data = await fetchJSON(`https://api.metalpriceapi.com/v1/latest?api_key=${METALS_KEY}&base=USD&currencies=XAU`);
-      if (!data.success) throw new Error(data.error?.info || 'MetalPriceAPI error');
-      send(res, 200, { simbolo:'XAU/USD', precio: Math.round((1/data.rates.XAU)*100)/100, moneda:'USD', timestamp:data.timestamp, fuente:'MetalPriceAPI' });
+      let precio = null, fuente = '';
+
+      // Intento 1: Metals-API gratuita (frankfurter style)
+      try {
+        const d = await fetchJSON('https://api.frankfurter.app/latest?from=XAU&to=USD');
+        if (d.rates && d.rates.USD) {
+          precio = Math.round(d.rates.USD * 100) / 100;
+          fuente = 'Frankfurter';
+        }
+      } catch(e) { console.log('Frankfurter falló:', e.message); }
+
+      // Intento 2: Exchange Rate API (XAU/USD gratuita sin límite)
+      if (!precio) {
+        try {
+          const d = await fetchJSON('https://open.er-api.com/v6/latest/XAU');
+          if (d.rates && d.rates.USD) {
+            precio = Math.round(d.rates.USD * 100) / 100;
+            fuente = 'ExchangeRate-API';
+          }
+        } catch(e) { console.log('ExchangeRate falló:', e.message); }
+      }
+
+      // Intento 3: Metals-API pública
+      if (!precio) {
+        try {
+          const d = await fetchJSON('https://metals-api.com/api/latest?access_key=free&base=XAU&symbols=USD');
+          if (d.rates && d.rates.USD) {
+            precio = Math.round((1 / d.rates.USD) * 100) / 100;
+            fuente = 'Metals-API';
+          }
+        } catch(e) { console.log('Metals-API falló:', e.message); }
+      }
+
+      if (!precio) {
+        send(res, 500, { error: 'No se pudo obtener precio del oro' });
+        return;
+      }
+
+      send(res, 200, {
+        simbolo:   'XAU/USD',
+        precio,
+        moneda:    'USD',
+        timestamp: Math.floor(Date.now() / 1000),
+        fuente,
+      });
       return;
     }
 
